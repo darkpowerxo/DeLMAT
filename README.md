@@ -11,9 +11,11 @@ This repository contains a training script that utilizes the following process:
 > 5. We tokenize all of our restricted prompts and build a dataset out of it.
 > 6. We begin the training loop, registering forward hooks on each pass and capturing activation data during training
 > 7. We calculate our loss by comparing our activation with the previously stored mean refusal activation and mean accepted activation. An activation closer to the mean refusal activation produces a higher loss. An additional penalty is added based on probabilities of tokens that are common in refusals (ex. "sorry")
-> 8. Save the model and enjoy your new morally bankrupt LLM
+> 8. Save a LoRA adapter, bake it into the model, save the model, and enjoy your new morally bankrupt LLM
 
 
 You will need to tweak the learning rate and epochs per model - I've found that the optimal values are wildly inconsistent.
 
 Remember to fill in `restricted_prompts` before use, containing prompts that you are certain your model will refuse.
+
+For the purpose of memory efficiency, `load_in_4bit` is currently used. This was designed to run on a single 3090, but if you have the hardware, you might want to load in full precision.
