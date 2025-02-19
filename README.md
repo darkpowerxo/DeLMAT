@@ -1,4 +1,4 @@
-# DELMAT
+# DeLMAT
 Decensoring Language Models Through Activation Tuning
 
 This repository contains a training script that utilizes the following process:
