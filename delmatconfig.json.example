@@ -1,6 +1,7 @@
 {
     "model_name": "../mymodel",
     "output_dir": "../mymodel-DeLMAT",
+    "learning_rate": 3e-4,
     "penalty_words": [
         "appropriate",
         "sorry",

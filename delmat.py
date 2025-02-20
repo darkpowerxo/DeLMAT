@@ -241,7 +241,7 @@ if __name__ == "__main__":
 
     # Compute initial reference activations
     restricted_mean, accepted_mean = compute_reference_activations()
-    optimizer = torch.optim.Adam(model.parameters(), lr=4e-4)  # Increased learning rate
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])  # Increased learning rate
     num_epochs = 2
     device = model.device
 
