@@ -4,18 +4,11 @@ from peft import LoraConfig, get_peft_model, PeftModel
 import torch.nn.functional as F
 import logging
 import json
+import os
 
-# Load configuration from delmatconfig.json
-config_path = "./delmatconfig.json"
-with open(config_path, "r") as f:
-    config = json.load(f)
-
-# Get values from config
-PENALTY_WORDS = config["penalty_words"]
-restricted_prompts = config["restricted_prompts"]
-accepted_prompts = config["accepted_prompts"]
-# Combine prompts for training data
-all_prompts = restricted_prompts + accepted_prompts
+# Ensure we're working from the script's directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(script_dir)
 
 class PromptDataset(torch.utils.data.Dataset):
     def __init__(self, encodings):
@@ -154,14 +147,27 @@ def compute_mean_activations(storage_dict):
     return mean_activations
 
 if __name__ == "__main__":
+    # Load configuration from delmatconfig.json
+    config_path = "./delmatconfig.json"
+    with open(config_path, "r") as f:
+        config = json.load(f)
+
+    # Get values from config
+    PENALTY_WORDS = config["penalty_words"]
+    restricted_prompts = config["restricted_prompts"]
+    accepted_prompts = config["accepted_prompts"]
+    # Combine prompts for training data
+    all_prompts = restricted_prompts + accepted_prompts
+
     # Enable anomaly detection
     torch.autograd.set_detect_anomaly(True)
 
     # Set up logging
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
-    model_name = './mymodel'
-    output_dir = './mymodel-DeLMAT'
+    # Get model configuration from config
+    model_name = config["model_name"]
+    output_dir = config["output_dir"]
 
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", load_in_4bit=True)
     tokenizer = AutoTokenizer.from_pretrained(model_name)

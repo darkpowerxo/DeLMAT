@@ -1,4 +1,6 @@
 {
+    "model_name": "../mymodel",
+    "output_dir": "../mymodel-DeLMAT",
     "penalty_words": [
         "appropriate",
         "sorry",
