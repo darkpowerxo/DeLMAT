@@ -61,6 +61,7 @@ fn tokenize_prompt(prompt: &str, tokenizer: &Tokenizer, max_length: usize) -> Te
 
 // This function assumes the model returns a tuple where the first element is logits,
 // and subsequent elements are per-layer activations.
+// Simulated forward pass that returns (logits, per-layer activations)
 fn forward_with_activations(model: &CModule, input: &Tensor) -> (Tensor, Vec<Tensor>) {
     let output = model.forward_ts(&[input]).unwrap();
     let outputs = output.to_tuple().unwrap();
@@ -201,8 +202,55 @@ fn compute_mean_activations_map(activations: &HashMap<usize, Vec<Tensor>>) -> Ha
     mean_map
 }
 
+// ----- Simulated LoRA/PEFT integration functions -----
+struct LoRAConfig {
+    r: i32,
+    lora_alpha: i32,
+    target_modules: Vec<String>,
+    lora_dropout: f64,
+    bias: String,
+    task_type: String,
+}
+
+fn get_peft_model(model: CModule, lora_config: &LoRAConfig) -> CModule {
+    println!("Applying LoRA adapter: r={}, lora_alpha={}, targets={:?}",
+             lora_config.r, lora_config.lora_alpha, lora_config.target_modules);
+    // Dummy: return model unchanged.
+    model
+}
+
+fn save_lora_adapter(model: &CModule, path: &str) -> Result<()> {
+    println!("Saving LoRA adapter to {}", path);
+    model.save(path)?;
+    Ok(())
+}
+
+fn load_original_model(model_name: &str, device: TchDevice) -> Result<CModule> {
+    println!("Loading original 16-bit model: {}", model_name);
+    let mut model = CModule::load(model_name)?;
+    // Simulate setting model to float16.
+    model.to(device)?;
+    Ok(model)
+}
+
+fn load_peft_adapter(model: CModule, adapter_path: &str) -> Result<CModule> {
+    println!("Loading LoRA adapter from {}", adapter_path);
+    // Dummy: in practice, load adapter weights and update model.
+    Ok(model)
+}
+
+fn merge_and_unload(model: CModule) -> CModule {
+    println!("Merging LoRA adapter into the base model and unloading adapter");
+    // Dummy merge: return model unchanged.
+    model
+}
+// --------------------------------------------------------
+
 fn main() -> Result<()> {
-    // Enable CUDA optimizations
+    // Simulate enabling anomaly detection.
+    println!("Enabling anomaly detection (simulated)");
+
+    // Enable CUDA optimizations.
     tch::Cuda::set_user_enabled_cudnn(true);
     tch::Cuda::cudnn_set_benchmark(true);
 
@@ -260,7 +308,18 @@ fn main() -> Result<()> {
     let vs = nn::VarStore::new(device);
     let mut opt = nn::Adam::default().build(&vs, config.learning_rate)?;
 
-    // Training loop with CUDA stream synchronization after each batch
+    // Apply LoRA adapter before training.
+    let lora_config = LoRAConfig {
+        r: 8,
+        lora_alpha: 16,
+        target_modules: vec!["layer1".to_string(), "layer2".to_string()],
+        lora_dropout: 0.0,
+        bias: "none".to_string(),
+        task_type: "CAUSAL_LM".to_string(),
+    };
+    model = get_peft_model(model, &lora_config);
+
+    // Training loop with CUDA stream synchronization and simulated cache clearing.
     for epoch in 0..config.num_epochs {
         println!("Epoch {}", epoch);
         let mut total_loss = 0.0;
@@ -294,7 +353,7 @@ fn main() -> Result<()> {
             loss.backward();
             tch::nn::clip_grad_norm_(vs.trainable_variables(), 1.0);
             opt.step();
-            // Synchronize CUDA stream for improved concurrency
+            // Simulate cache clearing.
             tch::Cuda::synchronize(0);
             total_loss += f64::from(loss);
             num_batches += 1;
@@ -303,10 +362,28 @@ fn main() -> Result<()> {
         println!("Epoch: {}, Average Loss: {:.6}", epoch, total_loss / num_batches as f64);
     }
 
-    println!("Saving trained model adapter...");
-    model.save(&format!("{}/final_model.pt", config.output_dir))?;
+    // Save the LoRA adapter.
+    let lora_path = format!("{}/lora_adapter.pt", config.output_dir);
+    println!("Saving the trained LoRA adapter...");
+    save_lora_adapter(&model, &lora_path)?;
 
-    // Optionally convert and run inference with TensorRT for faster CUDA inference
+    println!("Cleaning up model from memory...");
+    drop(model);
+    tch::Cuda::synchronize(0); // simulate empty_cache
+
+    // Reload original 16-bit model.
+    let mut model = load_original_model(&config.model_name, device)?;
+    println!("Loading LoRA adapter and applying it to the 16-bit model...");
+    model = load_peft_adapter(model, &lora_path)?;
+    println!("Merging LoRA adapter into the base model...");
+    model = merge_and_unload(model);
+
+    let save_path = format!("{}/final_model", config.output_dir);
+    println!("Saving final merged model...");
+    model.save(&format!("{}/final_model.pt", config.output_dir))?;
+    tokenizer.save(&format!("{}/final_tokenizer.json", save_path), false)?;
+
+    // Optionally run with TensorRT for faster cuda infrance.
     if config.use_tensorrt {
         println!("Building TensorRT engine...");
         let builder = Builder::new()?;
