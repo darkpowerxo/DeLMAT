@@ -19,5 +19,3 @@ You will need to tweak the learning rate and epochs per model - I've found that 
 Remember to fill in `restricted_prompts` before use, containing prompts that you are certain your model will refuse.
 
 For the purpose of memory efficiency, `load_in_4bit` is currently used. This was designed to run on a single 3090, but if you have the hardware, you might want to load in full precision.
-
-thanks to [Nick Perez](https://github.com/nkpz/DeLMAT) for the original implementation in python
