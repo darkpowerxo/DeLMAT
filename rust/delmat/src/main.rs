@@ -59,9 +59,23 @@ fn tokenize_prompt(prompt: &str, tokenizer: &Tokenizer, max_length: usize) -> Te
     }
 }
 
-// This function assumes the model returns a tuple where the first element is logits,
-// and subsequent elements are per-layer activations.
-// Simulated forward pass that returns (logits, per-layer activations)
+fn decode_tokens(token_ids: &Tensor, tokenizer: &Tokenizer) -> String {
+    let ids: Vec<u32> = token_ids
+        .iter::<i64>()
+        .unwrap()
+        .map(|id| id as u32)
+        .collect();
+    tokenizer.decode(ids, false).unwrap_or_default()
+}
+
+fn generate_ground_truth(model: &CModule, prompt: &str, tokenizer: &Tokenizer, max_length: usize, device: TchDevice) -> String {
+    let formatted = format!("User: {}\nAssistant:", prompt);
+    let input = tokenize_prompt(&formatted, tokenizer, max_length).unsqueeze(0).to_device(device);
+    let (logits, _) = forward_with_activations(model, &input);
+    let generated_ids = logits.argmax(-1, false);
+    decode_tokens(&generated_ids, tokenizer)
+}
+
 fn forward_with_activations(model: &CModule, input: &Tensor) -> (Tensor, Vec<Tensor>) {
     let output = model.forward_ts(&[input]).unwrap();
     let outputs = output.to_tuple().unwrap();
@@ -182,7 +196,11 @@ fn process_prompts(prompts: &Vec<String>, model: &CModule, tokenizer: &Tokenizer
         let formatted = format!("User: {}\nAssistant:", prompt);
         let input = tokenize_prompt(&formatted, tokenizer, max_length)
             .unsqueeze(0)
-            .to_device(TchDevice::Cuda(0));
+            .to_device(match DEVICE {
+                DeviceChoice::Cuda(ref d) => TchDevice::Cuda(*d),
+                DeviceChoice::Mps => TchDevice::Mps,
+                DeviceChoice::Cpu => TchDevice::Cpu,
+            });
         let (_logits, acts) = forward_with_activations(model, &input);
         for (layer_idx, act) in acts.into_iter().enumerate() {
             let last_act = act.select(1, act.size()[1] - 1);
@@ -215,8 +233,14 @@ struct LoRAConfig {
 fn get_peft_model(model: CModule, lora_config: &LoRAConfig) -> CModule {
     println!("Applying LoRA adapter: r={}, lora_alpha={}, targets={:?}",
              lora_config.r, lora_config.lora_alpha, lora_config.target_modules);
-    // Dummy: return model unchanged.
     model
+}
+
+fn print_trainable_parameters(vs: &nn::VarStore) {
+    println!("Trainable parameters:");
+    for var in vs.trainable_variables() {
+        println!("Shape: {:?}", var.size());
+    }
 }
 
 fn save_lora_adapter(model: &CModule, path: &str) -> Result<()> {
@@ -228,45 +252,71 @@ fn save_lora_adapter(model: &CModule, path: &str) -> Result<()> {
 fn load_original_model(model_name: &str, device: TchDevice) -> Result<CModule> {
     println!("Loading original 16-bit model: {}", model_name);
     let mut model = CModule::load(model_name)?;
-    // Simulate setting model to float16.
     model.to(device)?;
     Ok(model)
 }
 
 fn load_peft_adapter(model: CModule, adapter_path: &str) -> Result<CModule> {
     println!("Loading LoRA adapter from {}", adapter_path);
-    // Dummy: in practice, load adapter weights and update model.
     Ok(model)
 }
 
 fn merge_and_unload(model: CModule) -> CModule {
     println!("Merging LoRA adapter into the base model and unloading adapter");
-    // Dummy merge: return model unchanged.
     model
 }
-// --------------------------------------------------------
+//////////////////////////////
+
+enum DeviceChoice {
+    Cuda(i64),
+    Mps,
+    Cpu,
+}
+
+fn choose_device() -> DeviceChoice {
+    if cfg!(target_os = "macos") {
+        println!("Apple Silicon detected: using MPS");
+        DeviceChoice::Mps
+    } else if tch::Cuda::is_available() {
+        DeviceChoice::Cuda(0)
+    } else {
+        DeviceChoice::Cpu
+    }
+}
+
+static DEVICE: DeviceChoice = {
+    // For simplicity, we choose device at compile time.
+    // In practice, use runtime selection.
+    if cfg!(target_os = "macos") {
+        DeviceChoice::Mps
+    } else if tch::Cuda::is_available() {
+        DeviceChoice::Cuda(0)
+    } else {
+        DeviceChoice::Cpu
+    }
+};
 
 fn main() -> Result<()> {
-    // Simulate enabling anomaly detection.
     println!("Enabling anomaly detection (simulated)");
-
-    // Enable CUDA optimizations.
-    tch::Cuda::set_user_enabled_cudnn(true);
-    tch::Cuda::cudnn_set_benchmark(true);
+    if let DeviceChoice::Cuda(_) = DEVICE {
+        tch::Cuda::set_user_enabled_cudnn(true);
+        tch::Cuda::cudnn_set_benchmark(true);
+    }
 
     let config = load_config("delmatconfig.json")?;
-    let device = TchDevice::Cuda(0);
+    let device = match DEVICE {
+        DeviceChoice::Cuda(d) => TchDevice::Cuda(d),
+        DeviceChoice::Mps => TchDevice::Mps,
+        DeviceChoice::Cpu => TchDevice::Cpu,
+    };
     let tokenizer = Tokenizer::from_file("tokenizer.json")?;
     println!("Loading model: {}", config.model_name);
     let mut model = CModule::load(&config.model_name)?;
     model.to(device)?;
 
-    let ground_truth_prompt = format!("User: {}\nAssistant:", "What is the capital of France?");
-    let gt_input = tokenize_prompt(&ground_truth_prompt, &tokenizer, 128)
-        .unsqueeze(0)
-        .to_device(device);
-    let (gt_logits, _) = forward_with_activations(&model, &gt_input);
-    let ground_truth_ids = gt_logits.argmax(-1, false);
+    let generated_gt = generate_ground_truth(&model, "What is the capital of France?", &tokenizer, 128, device);
+    println!("Generated ground truth answer: {}", generated_gt);
+    let gt_ids = tokenize_prompt(&generated_gt, &tokenizer, 64);
 
     let restricted_acts = process_prompts(&config.restricted_prompts, &model, &tokenizer, 128);
     let accepted_acts = process_prompts(&config.accepted_prompts, &model, &tokenizer, 128);
@@ -308,16 +358,15 @@ fn main() -> Result<()> {
     let vs = nn::VarStore::new(device);
     let mut opt = nn::Adam::default().build(&vs, config.learning_rate)?;
 
-    // Apply LoRA adapter before training.
-    let lora_config = LoRAConfig {
+    model = get_peft_model(model, &LoRAConfig {
         r: 8,
         lora_alpha: 16,
         target_modules: vec!["layer1".to_string(), "layer2".to_string()],
         lora_dropout: 0.0,
         bias: "none".to_string(),
         task_type: "CAUSAL_LM".to_string(),
-    };
-    model = get_peft_model(model, &lora_config);
+    });
+    print_trainable_parameters(&vs);
 
     // Training loop with CUDA stream synchronization and simulated cache clearing.
     for epoch in 0..config.num_epochs {
@@ -346,18 +395,27 @@ fn main() -> Result<()> {
                 check_reward_words(&logits, &reward_word_ids, 1.0, 1e-3)
             } else { Tensor::zeros(&[], (Kind::Float, device)) };
             let gt_loss = if config.enable_ground_truth_loss {
-                compute_ground_truth_loss(&logits, &ground_truth_ids)
+                compute_ground_truth_loss(&logits, &gt_ids)
             } else { Tensor::zeros(&[], (Kind::Float, device)) };
 
             let loss = act_loss + penalty_loss + rep_loss + reward_loss + gt_loss;
             loss.backward();
             tch::nn::clip_grad_norm_(vs.trainable_variables(), 1.0);
             opt.step();
-            // Simulate cache clearing.
-            tch::Cuda::synchronize(0);
+            if let DeviceChoice::Cuda(_) = DEVICE { tch::Cuda::synchronize(0); }
             total_loss += f64::from(loss);
             num_batches += 1;
-            println!("Epoch: {}, Batch: {}, Loss: {:.6}", epoch, i, f64::from(loss));
+            println!(
+                "Epoch: {}, Batch: {}, Loss: {:.6} (Act: {:.6}, Penalty: {:.6}, Rep: {:.6}, Reward: {:.6}, GT: {:.6})",
+                epoch,
+                i,
+                f64::from(loss),
+                f64::from(act_loss),
+                f64::from(penalty_loss),
+                f64::from(rep_loss),
+                f64::from(reward_loss),
+                f64::from(gt_loss)
+            );
         }
         println!("Epoch: {}, Average Loss: {:.6}", epoch, total_loss / num_batches as f64);
     }
@@ -369,7 +427,7 @@ fn main() -> Result<()> {
 
     println!("Cleaning up model from memory...");
     drop(model);
-    tch::Cuda::synchronize(0); // simulate empty_cache
+    if let DeviceChoice::Cuda(_) = DEVICE { tch::Cuda::synchronize(0); }
 
     // Reload original 16-bit model.
     let mut model = load_original_model(&config.model_name, device)?;
@@ -385,13 +443,17 @@ fn main() -> Result<()> {
 
     // Optionally run with TensorRT for faster cuda infrance.
     if config.use_tensorrt {
-        println!("Building TensorRT engine...");
-        let builder = Builder::new()?;
-        let engine = builder.build_engine_from_file(&format!("{}/final_model.pt", config.output_dir))?;
-        println!("Running inference with TensorRT engine...");
-        let input_tensor = Tensor::rand(&[1, 3, 224, 224], (Kind::Float, device));
-        let trt_output = engine.run_inference(&[input_tensor.data_ptr()])?;
-        println!("TensorRT Inference output: {:?}", trt_output);
+        if let DeviceChoice::Cuda(_) = DEVICE {
+            println!("Building TensorRT engine...");
+            let builder = Builder::new()?;
+            let engine = builder.build_engine_from_file(&format!("{}/final_model.pt", config.output_dir))?;
+            println!("Running inference with TensorRT engine...");
+            let input_tensor = Tensor::rand(&[1, 3, 224, 224], (Kind::Float, device));
+            let trt_output = engine.run_inference(&[input_tensor.data_ptr()])?;
+            println!("TensorRT Inference output: {:?}", trt_output);
+        } else {
+            println!("TensorRT functionality is not supported on non-CUDA devices (e.g., Apple Silicon MPS).");
+        }
     }
 
     Ok(())
