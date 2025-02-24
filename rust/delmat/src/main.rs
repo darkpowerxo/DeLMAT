@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tch::{CModule, Device as TchDevice, Kind, Tensor, nn};
 use tokenizers::Tokenizer;
+use tensorrt_rs::{Engine, Builder};
 
 #[derive(Deserialize, Serialize)]
 struct Config {
@@ -20,6 +21,7 @@ struct Config {
     enable_reward_loss: bool,
     enable_rep_loss: bool,
     enable_ground_truth_loss: bool,
+    use_tensorrt: bool,
 }
 
 fn load_config(file_path: &str) -> Result<Config> {
@@ -41,14 +43,8 @@ impl PromptDataset {
         }
         Self { encodings }
     }
-
-    fn len(&self) -> usize {
-        self.encodings.len()
-    }
-
-    fn get(&self, idx: usize) -> &Tensor {
-        &self.encodings[idx]
-    }
+    fn len(&self) -> usize { self.encodings.len() }
+    fn get(&self, idx: usize) -> &Tensor { &self.encodings[idx] }
 }
 
 fn tokenize_prompt(prompt: &str, tokenizer: &Tokenizer, max_length: usize) -> Tensor {
@@ -70,9 +66,7 @@ fn forward_with_activations(model: &CModule, input: &Tensor) -> (Tensor, Vec<Ten
     let outputs = output.to_tuple().unwrap();
     let logits = outputs[0].shallow_clone();
     let mut activations = Vec::new();
-    for i in 1..outputs.len() {
-        activations.push(outputs[i].shallow_clone());
-    }
+    for i in 1..outputs.len() { activations.push(outputs[i].shallow_clone()); }
     (logits, activations)
 }
 
@@ -104,9 +98,7 @@ fn check_penalty_words(logits: &Tensor, penalty_word_ids: &Vec<Tensor>, multipli
         for word_ids in penalty_word_ids.iter() {
             let word_ids = word_ids.to_device(logits.device());
             let word_length = word_ids.size()[0];
-            if word_length > seq_length {
-                continue;
-            }
+            if word_length > seq_length { continue; }
             for pos in 0..(seq_length - word_length + 1) {
                 let window_logits = seq_logits.narrow(0, pos, word_length);
                 let probs = window_logits.softmax(-1, Kind::Float);
@@ -210,6 +202,10 @@ fn compute_mean_activations_map(activations: &HashMap<usize, Vec<Tensor>>) -> Ha
 }
 
 fn main() -> Result<()> {
+    // Enable CUDA optimizations
+    tch::Cuda::set_user_enabled_cudnn(true);
+    tch::Cuda::cudnn_set_benchmark(true);
+
     let config = load_config("delmatconfig.json")?;
     let device = TchDevice::Cuda(0);
     let tokenizer = Tokenizer::from_file("tokenizer.json")?;
@@ -242,9 +238,7 @@ fn main() -> Result<()> {
             let encoding = tokenizer.encode(variation, true).unwrap();
             let ids = Tensor::of_slice(encoding.get_ids());
             let key = ids.sum(Kind::Int64).int64_value(&[]);
-            if seen.insert(key) {
-                penalty_word_ids.push(ids);
-            }
+            if seen.insert(key) { penalty_word_ids.push(ids); }
         }
     }
     seen.clear();
@@ -258,17 +252,15 @@ fn main() -> Result<()> {
             let encoding = tokenizer.encode(variation, true).unwrap();
             let ids = Tensor::of_slice(encoding.get_ids());
             let key = ids.sum(Kind::Int64).int64_value(&[]);
-            if seen.insert(key) {
-                reward_word_ids.push(ids);
-            }
+            if seen.insert(key) { reward_word_ids.push(ids); }
         }
     }
 
     let train_dataset = PromptDataset::new(&config.restricted_prompts, &tokenizer, 128);
-    let batch_size = 1;
     let vs = nn::VarStore::new(device);
     let mut opt = nn::Adam::default().build(&vs, config.learning_rate)?;
 
+    // Training loop with CUDA stream synchronization after each batch
     for epoch in 0..config.num_epochs {
         println!("Epoch {}", epoch);
         let mut total_loss = 0.0;
@@ -302,6 +294,8 @@ fn main() -> Result<()> {
             loss.backward();
             tch::nn::clip_grad_norm_(vs.trainable_variables(), 1.0);
             opt.step();
+            // Synchronize CUDA stream for improved concurrency
+            tch::Cuda::synchronize(0);
             total_loss += f64::from(loss);
             num_batches += 1;
             println!("Epoch: {}, Batch: {}, Loss: {:.6}", epoch, i, f64::from(loss));
@@ -311,5 +305,17 @@ fn main() -> Result<()> {
 
     println!("Saving trained model adapter...");
     model.save(&format!("{}/final_model.pt", config.output_dir))?;
+
+    // Optionally convert and run inference with TensorRT for faster CUDA inference
+    if config.use_tensorrt {
+        println!("Building TensorRT engine...");
+        let builder = Builder::new()?;
+        let engine = builder.build_engine_from_file(&format!("{}/final_model.pt", config.output_dir))?;
+        println!("Running inference with TensorRT engine...");
+        let input_tensor = Tensor::rand(&[1, 3, 224, 224], (Kind::Float, device));
+        let trt_output = engine.run_inference(&[input_tensor.data_ptr()])?;
+        println!("TensorRT Inference output: {:?}", trt_output);
+    }
+
     Ok(())
 }
